@@ -3,135 +3,70 @@
 #include <d3d11.h>
 #include <DirectXMath.h>
 #include <d3dcompiler.h>
-#include "Imgui/imgui_internal.h"
+#include "ImGui\imgui_internal.h"
 
 #pragma comment(lib, "d3dcompiler.lib")
 
-class DX11BlurEffect
-{
-public:
-    DX11BlurEffect() = default;
-    ~DX11BlurEffect();
+namespace DX11BlurEffectNS {
+    // ============================================================================
+    // Shader Sources
+    // ============================================================================
 
-    bool Initialize(ID3D11Device* dev, ID3D11DeviceContext* ctx);
-    void BeginBlur();
-    void ApplyBlur(ImDrawList* drawList, const ImVec2& pos, const ImVec2& size, float radius, float rounding = 0.f, ImDrawFlags flags = 0);
-    void EndBlur();
-
-    // 新增：设置是否捕获 ImGui 内容（而不仅是游戏画面）
-    void SetCaptureImGui(bool capture) { captureImGui = capture; }
-    // 新增：强制刷新模糊缓存（窗口尺寸变化时调用）
-    void InvalidateCache() { cacheValid = false; }
-
-private:
-    bool CreateShaders();
-    bool CreateSamplerState();
-    bool CreateBlurTextures(int width, int height);
-    bool CreateFullscreenQuadResources();
-    void DrawFullscreenQuad();
-    // 新增：执行实际的 2-Pass 模糊，可复用
-    void ExecuteBlurPass(float radius);
-    // 新增：将当前 RT 内容拷贝到 blurTexture
-    void CaptureCurrentRT();
-
-    struct FullscreenQuadVertex;
-
-    ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-
-    ID3D11PixelShader* blurShaderX = nullptr;
-    ID3D11PixelShader* blurShaderY = nullptr;
-    ID3D11SamplerState* samplerState = nullptr;
-
-    ID3D11Texture2D* blurTexture = nullptr;
-    ID3D11ShaderResourceView* blurSRV = nullptr;
-    ID3D11RenderTargetView* blurRTV = nullptr;
-
-    ID3D11Texture2D* blurTextureX = nullptr;
-    ID3D11ShaderResourceView* blurSRVX = nullptr;
-    ID3D11RenderTargetView* blurRTVX = nullptr;
-
-    ID3D11Texture2D* blurTextureY = nullptr;
-    ID3D11ShaderResourceView* blurSRVY = nullptr;
-    ID3D11RenderTargetView* blurRTVY = nullptr;
-
-    ID3D11Buffer* fullscreenQuadVertexBuffer = nullptr;
-    ID3D11VertexShader* fullscreenQuadVertexShader = nullptr;
-    ID3D11InputLayout* fullscreenQuadInputLayout = nullptr;
-
-    // 新增：常量缓冲（复用，避免每帧创建）
-    ID3D11Buffer* constantBuffer = nullptr;
-
-    ID3D11RenderTargetView* rtBackup = nullptr;
-    int                     backbufferWidth = 0;
-    int                     backbufferHeight = 0;
-    bool                    isInitialized = false;
-
-    // 新增：缓存机制
-    bool                    cacheValid = false;      // 模糊结果是否有效
-    float                   cachedRadius = 0.0f;       // 缓存的模糊半径
-    bool                    captureImGui = false;      // 是否捕获 ImGui 内容
-};
-
-inline DX11BlurEffect blurEffect = DX11BlurEffect();
-
-// ============================================================================
-// Implementation
-// ============================================================================
-
-static constexpr const char* BLUR_X_SHADER = R"(
+    static constexpr const char* BLUR_X_SHADER = R"(
     Texture2D tex : register(t0);
     SamplerState samp : register(s0);
-    cbuffer Constants : register(b0) { 
-        float pixelSize; 
+    cbuffer Constants : register(b0) {
+        float pixelSize;
         float radius;
         float padding[2];
     }
- 
-    float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
-        float4 color = 0;
-        float total_weight = 0;
-        float r = clamp(radius, 0.0, 64.0);  // 限制最大半径保证性能
-        if (r < 0.5) return tex.Sample(samp, uv);  // 半径太小，直接返回原图
-        
-        float sigma = r / 3.0;
-        [loop]
-        for(float x = -r; x <= r; x += 1.0) {
-            float weight = exp(-(x * x) / (2.0 * sigma * sigma));
-            color += tex.Sample(samp, uv + float2(x * pixelSize, 0)) * weight;
-            total_weight += weight;
-        }
-        return color / total_weight;
-    }
-)";
 
-static constexpr const char* BLUR_Y_SHADER = R"(
-    Texture2D tex : register(t0);
-    SamplerState samp : register(s0);
-    cbuffer Constants : register(b0) { 
-        float pixelSize; 
-        float radius;
-        float padding[2];
-    }
- 
     float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
         float4 color = 0;
         float total_weight = 0;
         float r = clamp(radius, 0.0, 64.0);
-        if (r < 0.5) return tex.Sample(samp, uv);
-        
+        if (r < 0.5) return float4(tex.Sample(samp, uv).b, tex.Sample(samp, uv).g, tex.Sample(samp, uv).r, tex.Sample(samp, uv).a);
+
         float sigma = r / 3.0;
         [loop]
-        for(float y = -r; y <= r; y += 1.0) {
-            float weight = exp(-(y * y) / (2.0 * sigma * sigma));
-            color += tex.Sample(samp, uv + float2(0, y * pixelSize)) * weight;
+        for(float x = -r; x <= r; x += 1.0) {
+            float weight = exp(-(x * x) / (2.0 * sigma * sigma));
+            float4 s = tex.Sample(samp, uv + float2(x * pixelSize, 0));
+            color += float4(s.b, s.g, s.r, s.a) * weight;
             total_weight += weight;
         }
         return color / total_weight;
     }
 )";
 
-static constexpr const char* FULLSCREEN_QUAD_VS = R"(
+    static constexpr const char* BLUR_Y_SHADER = R"(
+    Texture2D tex : register(t0);
+    SamplerState samp : register(s0);
+    cbuffer Constants : register(b0) {
+        float pixelSize;
+        float radius;
+        float padding[2];
+    }
+
+    float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+        float4 color = 0;
+        float total_weight = 0;
+        float r = clamp(radius, 0.0, 64.0);
+        if (r < 0.5) return float4(tex.Sample(samp, uv).b, tex.Sample(samp, uv).g, tex.Sample(samp, uv).r, tex.Sample(samp, uv).a);
+
+        float sigma = r / 3.0;
+        [loop]
+        for(float y = -r; y <= r; y += 1.0) {
+            float weight = exp(-(y * y) / (2.0 * sigma * sigma));
+            float4 s = tex.Sample(samp, uv + float2(0, y * pixelSize));
+            color += float4(s.b, s.g, s.r, s.a) * weight;
+            total_weight += weight;
+        }
+        return color / total_weight;
+    }
+)";
+
+    static constexpr const char* FULLSCREEN_QUAD_VS = R"(
     struct VS_OUTPUT {
         float4 position : SV_POSITION;
         float2 uv : TEXCOORD0;
@@ -144,342 +79,443 @@ static constexpr const char* FULLSCREEN_QUAD_VS = R"(
     }
 )";
 
-struct DX11BlurEffect::FullscreenQuadVertex {
-    float position[2];
-};
+    struct FullscreenQuadVertex {
+        float position[2];
+    };
 
-bool DX11BlurEffect::CreateShaders() {
-    HRESULT hr = S_OK;
-    ID3DBlob* shaderBlob = nullptr;
-    ID3DBlob* errorBlob = nullptr;
+    // ============================================================================
+    // BlurEffect Class
+    // ============================================================================
 
-    hr = D3DCompile(BLUR_X_SHADER, strlen(BLUR_X_SHADER), nullptr, nullptr, nullptr,
-        "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &shaderBlob, &errorBlob);
-    if (FAILED(hr)) {
-        if (errorBlob) errorBlob->Release();
-        return false;
-    }
+    struct BlurEffect {
+        BlurEffect() = default;
+        ~BlurEffect() { ReleaseResources(); }
 
-    hr = device->CreatePixelShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &blurShaderX);
-    shaderBlob->Release();
-    if (FAILED(hr)) return false;
+        bool Initialize(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
+            if (!dev || !ctx) return false;
+            device = dev;
+            context = ctx;
+            if (!CreateShaders() || !CreateSamplerState() || !CreateBlurTextures(1, 1) || !CreateFullscreenQuadResources()) {
+                return false;
+            }
 
-    hr = D3DCompile(BLUR_Y_SHADER, strlen(BLUR_Y_SHADER), nullptr, nullptr, nullptr,
-        "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &shaderBlob, &errorBlob);
-    if (FAILED(hr)) {
-        if (errorBlob) errorBlob->Release();
-        return false;
-    }
+            D3D11_BUFFER_DESC cbDesc = {};
+            cbDesc.ByteWidth = sizeof(float) * 4;
+            cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+            cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+            cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&cbDesc, nullptr, &constantBuffer))) {
+                return false;
+            }
 
-    hr = device->CreatePixelShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &blurShaderY);
-    shaderBlob->Release();
-    if (errorBlob) errorBlob->Release();
-    if (FAILED(hr)) return false;
+            isInitialized = true;
+            return true;
+        }
+        bool IsInitialized() const { return isInitialized; }
 
-    return true;
-}
+        void ApplyBlur(
+            ImDrawList* drawList,
+            const ImVec2& pos,
+            const ImVec2& size,
+            float radius,
+            float rounding,
+            ImDrawFlags flags,
+            ImU32 tint)
+        {
+            if (!isInitialized || !blurSRVY) return;
 
-bool DX11BlurEffect::CreateSamplerState() {
-    D3D11_SAMPLER_DESC samplerDesc = {};
-    samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    samplerDesc.MinLOD = 0;
-    samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+            ImVec2 screenSize = ImGui::GetIO().DisplaySize;
+            if (screenSize.x <= 0 || screenSize.y <= 0) return;
 
-    HRESULT hr = device->CreateSamplerState(&samplerDesc, &samplerState);
-    return !FAILED(hr);
-}
+            ImVec2 uv0(pos.x / screenSize.x, pos.y / screenSize.y);
+            ImVec2 uv1((pos.x + size.x) / screenSize.x, (pos.y + size.y) / screenSize.y);
 
-bool DX11BlurEffect::CreateBlurTextures(int width, int height) {
-    auto create_texture_resources = [&](ID3D11Texture2D** texture, ID3D11ShaderResourceView** srv, ID3D11RenderTargetView** rtv) -> bool {
-        if (*texture) (*texture)->Release(); *texture = nullptr;
-        if (*srv) (*srv)->Release(); *srv = nullptr;
-        if (*rtv) (*rtv)->Release(); *rtv = nullptr;
+            drawList->AddImageRounded(
+                reinterpret_cast<ImTextureID>(blurSRVY),
+                pos,
+                ImVec2(pos.x + size.x, pos.y + size.y),
+                uv0,
+                uv1,
+                tint,
+                rounding,
+                flags
+            );
+        }
 
-        D3D11_TEXTURE2D_DESC textureDesc = {};
-        textureDesc.Width = width;
-        textureDesc.Height = height;
-        textureDesc.MipLevels = 1;
-        textureDesc.ArraySize = 1;
-        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        textureDesc.SampleDesc.Count = 1;
-        textureDesc.Usage = D3D11_USAGE_DEFAULT;
-        textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        bool CaptureAndBlur(IDXGISwapChain* pSwapChain, float radius) {
+            if (!isInitialized || !pSwapChain || radius < 0.5f) return radius < 0.5f;
 
-        HRESULT hr = device->CreateTexture2D(&textureDesc, nullptr, texture);
-        if (FAILED(hr)) return false;
-        hr = device->CreateShaderResourceView(*texture, nullptr, srv);
-        if (FAILED(hr)) return false;
-        hr = device->CreateRenderTargetView(*texture, nullptr, rtv);
-        if (FAILED(hr)) return false;
-        return true;
+            ID3D11Texture2D* backBuffer = nullptr;
+            if (FAILED(pSwapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer))) || !backBuffer) {
+                return false;
+            }
+
+            D3D11_TEXTURE2D_DESC desc;
+            backBuffer->GetDesc(&desc);
+
+            if (backbufferWidth != (int)desc.Width || backbufferHeight != (int)desc.Height) {
+                ReleaseBlurTextures();
+                if (!CreateBlurTextures((int)desc.Width, (int)desc.Height, desc.Format)) {
+                    backBuffer->Release();
+                    return false;
+                }
+                backbufferWidth = (int)desc.Width;
+                backbufferHeight = (int)desc.Height;
+            }
+
+            ID3D11ShaderResourceView* backBufferSRV = nullptr;
+            D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+            srvDesc.Format = desc.Format;
+            srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            srvDesc.Texture2D.MostDetailedMip = 0;
+            srvDesc.Texture2D.MipLevels = 1;
+            HRESULT hr = device->CreateShaderResourceView(backBuffer, &srvDesc, &backBufferSRV);
+            backBuffer->Release();
+            if (FAILED(hr) || !backBufferSRV) {
+                return false;
+            }
+
+            ExecuteBlurPass(radius, backBufferSRV);
+            backBufferSRV->Release();
+            return true;
+        }
+
+    private:
+        // ============================================================================
+        // Implementation
+        // ============================================================================
+
+        struct BlurConstants {
+            float pixelSize;
+            float radius;
+            float padding[2];
         };
 
-    if (!create_texture_resources(&blurTextureX, &blurSRVX, &blurRTVX)) return false;
-    if (!create_texture_resources(&blurTextureY, &blurSRVY, &blurRTVY)) return false;
-    if (!create_texture_resources(&blurTexture, &blurSRV, &blurRTV)) return false;
-    return true;
-}
+        bool CreateShaders() {
+            ID3DBlob* shaderBlob = nullptr;
+            ID3DBlob* errorBlob = nullptr;
 
-bool DX11BlurEffect::CreateFullscreenQuadResources() {
-    FullscreenQuadVertex vertices[] = {
-        {-1.0f,  1.0f},
-        { 1.0f,  1.0f},
-        {-1.0f, -1.0f},
-        { 1.0f, -1.0f}
-    };
+            HRESULT hr = D3DCompile(BLUR_X_SHADER, strlen(BLUR_X_SHADER), nullptr, nullptr, nullptr,
+                "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &shaderBlob, &errorBlob);
+            if (FAILED(hr)) {
+                if (errorBlob) errorBlob->Release();
+                return false;
+            }
 
-    D3D11_BUFFER_DESC vbDesc = {};
-    vbDesc.ByteWidth = sizeof(vertices);
-    vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
-    vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    D3D11_SUBRESOURCE_DATA vbData = { vertices, 0, 0 };
+            hr = device->CreatePixelShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &blurShaderX);
+            shaderBlob->Release();
+            if (FAILED(hr)) return false;
 
-    HRESULT hr = device->CreateBuffer(&vbDesc, &vbData, &fullscreenQuadVertexBuffer);
-    if (FAILED(hr)) return false;
+            hr = D3DCompile(BLUR_Y_SHADER, strlen(BLUR_Y_SHADER), nullptr, nullptr, nullptr,
+                "main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &shaderBlob, &errorBlob);
+            if (FAILED(hr)) {
+                if (errorBlob) errorBlob->Release();
+                return false;
+            }
 
-    D3D11_INPUT_ELEMENT_DESC layout[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }
-    };
-
-    ID3DBlob* vsBlob = nullptr;
-    ID3DBlob* errorBlobVS = nullptr;
-
-    hr = D3DCompile(FULLSCREEN_QUAD_VS, strlen(FULLSCREEN_QUAD_VS), nullptr, nullptr, nullptr,
-        "main", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vsBlob, &errorBlobVS);
-    if (FAILED(hr)) {
-        if (errorBlobVS) errorBlobVS->Release();
-        return false;
-    }
-
-    hr = device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &fullscreenQuadVertexShader);
-    if (FAILED(hr)) {
-        vsBlob->Release();
-        return false;
-    }
-
-    hr = device->CreateInputLayout(layout, 1, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &fullscreenQuadInputLayout);
-    vsBlob->Release();
-    if (errorBlobVS) errorBlobVS->Release();
-    return !FAILED(hr);
-}
-
-void DX11BlurEffect::DrawFullscreenQuad() {
-    if (!fullscreenQuadVertexBuffer || !fullscreenQuadVertexShader) return;
-
-    UINT stride = sizeof(FullscreenQuadVertex);
-    UINT offset = 0;
-    context->IASetVertexBuffers(0, 1, &fullscreenQuadVertexBuffer, &stride, &offset);
-    context->IASetInputLayout(fullscreenQuadInputLayout);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-    context->VSSetShader(fullscreenQuadVertexShader, nullptr, 0);
-    context->Draw(4, 0);
-}
-
-bool DX11BlurEffect::Initialize(ID3D11Device* dev, ID3D11DeviceContext* ctx) {
-    if (!dev || !ctx) return false;
-    device = dev;
-    context = ctx;
-    if (!CreateShaders() || !CreateSamplerState() || !CreateBlurTextures(1, 1) || !CreateFullscreenQuadResources()) {
-        return false;
-    }
-
-    // 创建复用的常量缓冲
-    D3D11_BUFFER_DESC cbDesc = {};
-    cbDesc.ByteWidth = sizeof(float) * 4;  // float4
-    cbDesc.Usage = D3D11_USAGE_DYNAMIC;
-    cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    HRESULT hr = device->CreateBuffer(&cbDesc, nullptr, &constantBuffer);
-    if (FAILED(hr)) return false;
-
-    isInitialized = true;
-    return true;
-}
-
-void DX11BlurEffect::CaptureCurrentRT() {
-    ID3D11RenderTargetView* currentRTV = nullptr;
-    context->OMGetRenderTargets(1, &currentRTV, nullptr);
-    if (!currentRTV) return;
-
-    ID3D11Texture2D* currentRT = nullptr;
-    currentRTV->GetResource(reinterpret_cast<ID3D11Resource**>(&currentRT));
-    if (!currentRT) {
-        currentRTV->Release();
-        return;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    currentRT->GetDesc(&desc);
-
-    if (backbufferWidth != desc.Width || backbufferHeight != desc.Height) {
-        if (!CreateBlurTextures(desc.Width, desc.Height)) {
-            currentRT->Release();
-            currentRTV->Release();
-            return;
+            hr = device->CreatePixelShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr, &blurShaderY);
+            shaderBlob->Release();
+            if (errorBlob) errorBlob->Release();
+            return !FAILED(hr);
         }
-        backbufferWidth = desc.Width;
-        backbufferHeight = desc.Height;
-        cacheValid = false;  // 尺寸变化，缓存失效
-    }
 
-    context->CopyResource(blurTexture, currentRT);
-
-    currentRT->Release();
-    currentRTV->Release();
-}
-
-void DX11BlurEffect::BeginBlur() {
-    if (!isInitialized) return;
-    context->OMGetRenderTargets(1, &rtBackup, nullptr);
-    CaptureCurrentRT();
-    cacheValid = false;  // 新帧，缓存失效
-}
-
-void DX11BlurEffect::ExecuteBlurPass(float radius) {
-    if (!constantBuffer) return;
-
-    struct BlurConstants {
-        float pixelSize;
-        float radius;
-        float padding[2];
-    };
-
-    D3D11_VIEWPORT viewport = {
-        0.0f, 
-        0.0f, 
-        static_cast<float>(backbufferWidth), 
-        static_cast<float>(backbufferHeight), 
-        0.0f, 
-        1.0f
-    };
-    context->RSSetViewports(1, &viewport);
-
-    // Pass 1: Horizontal blur
-    ID3D11RenderTargetView* rtvX[] = { blurRTVX };
-    context->OMSetRenderTargets(1, rtvX, nullptr);
-    context->PSSetShader(blurShaderX, nullptr, 0);
-    context->PSSetConstantBuffers(0, 1, &constantBuffer);
-    context->PSSetSamplers(0, 1, &samplerState);
-    context->PSSetShaderResources(0, 1, &blurSRV);
-
-    {
-        BlurConstants constants = {1.0f / backbufferWidth, radius, 0.0f, 0.0f};
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        HRESULT hr = context->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (!FAILED(hr)) {
-            memcpy(mapped.pData, &constants, sizeof(constants));
-            context->Unmap(constantBuffer, 0);
+        bool CreateSamplerState() {
+            D3D11_SAMPLER_DESC samplerDesc = {};
+            samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+            samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+            samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            samplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+            samplerDesc.MinLOD = 0;
+            samplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+            return !FAILED(device->CreateSamplerState(&samplerDesc, &samplerState));
         }
-    }
 
-    DrawFullscreenQuad();
+        bool CreateBlurTextures(int width, int height, DXGI_FORMAT fmt = DXGI_FORMAT_R8G8B8A8_UNORM) {
+            auto create_texture_resources = [&](ID3D11Texture2D** texture, ID3D11ShaderResourceView** srv, ID3D11RenderTargetView** rtv, DXGI_FORMAT useFmt) -> bool {
+                if (*texture) (*texture)->Release(); *texture = nullptr;
+                if (*srv) (*srv)->Release(); *srv = nullptr;
+                if (*rtv) (*rtv)->Release(); *rtv = nullptr;
 
-    // Unbind - 修复：声明 nullSRV 和 nullRTV
-    ID3D11ShaderResourceView* nullSRV[] = { nullptr };
-    context->PSSetShaderResources(0, 1, nullSRV);
-    ID3D11RenderTargetView* nullRTV[] = { nullptr };
-    context->OMSetRenderTargets(1, nullRTV, nullptr);
+                D3D11_TEXTURE2D_DESC textureDesc = {};
+                textureDesc.Width = width;
+                textureDesc.Height = height;
+                textureDesc.MipLevels = 1;
+                textureDesc.ArraySize = 1;
+                textureDesc.Format = useFmt;
+                textureDesc.SampleDesc.Count = 1;
+                textureDesc.Usage = D3D11_USAGE_DEFAULT;
+                textureDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
 
-    // Pass 2: Vertical blur
-    ID3D11RenderTargetView* rtvY[] = { blurRTVY };
-    context->OMSetRenderTargets(1, rtvY, nullptr);
-    context->PSSetShader(blurShaderY, nullptr, 0);
-    context->PSSetConstantBuffers(0, 1, &constantBuffer);
-    context->PSSetSamplers(0, 1, &samplerState);
-    context->PSSetShaderResources(0, 1, &blurSRVX);
+                if (FAILED(device->CreateTexture2D(&textureDesc, nullptr, texture))) return false;
+                if (FAILED(device->CreateShaderResourceView(*texture, nullptr, srv))) return false;
+                if (FAILED(device->CreateRenderTargetView(*texture, nullptr, rtv))) return false;
+                return true;
+            };
 
-    {
-        BlurConstants constants = {1.0f / backbufferHeight, radius, 0.0f, 0.0f};
-        D3D11_MAPPED_SUBRESOURCE mapped;
-        HRESULT hr = context->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-        if (!FAILED(hr)) {
-            memcpy(mapped.pData, &constants, sizeof(constants));
-            context->Unmap(constantBuffer, 0);
+            if (!create_texture_resources(&blurTextureX, &blurSRVX, &blurRTVX, fmt)) return false;
+            if (!create_texture_resources(&blurTextureY, &blurSRVY, &blurRTVY, DXGI_FORMAT_R8G8B8A8_UNORM)) return false;
+            return true;
         }
-    }
 
-    DrawFullscreenQuad();
+        bool CreateFullscreenQuadResources() {
+            FullscreenQuadVertex vertices[] = {
+                {-1.0f,  1.0f},
+                { 1.0f,  1.0f},
+                {-1.0f, -1.0f},
+                { 1.0f, -1.0f}
+            };
 
-    // Unbind
-    context->PSSetShaderResources(0, 1, nullSRV);
-    context->OMSetRenderTargets(1, nullRTV, nullptr);
+            D3D11_BUFFER_DESC vbDesc = {};
+            vbDesc.ByteWidth = sizeof(vertices);
+            vbDesc.Usage = D3D11_USAGE_IMMUTABLE;
+            vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            D3D11_SUBRESOURCE_DATA vbData = { vertices, 0, 0 };
 
-    cacheValid = true;
-    cachedRadius = radius;
-}
+            if (FAILED(device->CreateBuffer(&vbDesc, &vbData, &fullscreenQuadVertexBuffer))) return false;
 
-void DX11BlurEffect::ApplyBlur(ImDrawList* drawList, const ImVec2& pos, const ImVec2& size,
-    float radius, float rounding, ImDrawFlags flags) {
-    if (!isInitialized) return;
+            D3D11_INPUT_ELEMENT_DESC layout[] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+            };
 
-    // 优化：如果缓存有效且半径相同，直接复用结果
-    if (!cacheValid || cachedRadius != radius) {
-        ExecuteBlurPass(radius);
-    }
+            ID3DBlob* vsBlob = nullptr;
+            ID3DBlob* errorBlobVS = nullptr;
+            HRESULT hr = D3DCompile(FULLSCREEN_QUAD_VS, strlen(FULLSCREEN_QUAD_VS), nullptr, nullptr, nullptr,
+                "main", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vsBlob, &errorBlobVS);
+            if (FAILED(hr)) {
+                if (errorBlobVS) errorBlobVS->Release();
+                return false;
+            }
+            if (errorBlobVS) errorBlobVS->Release();
 
-    // 恢复原始渲染目标
-    context->OMSetRenderTargets(1, &rtBackup, nullptr);
+            hr = device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &fullscreenQuadVertexShader);
+            if (FAILED(hr)) {
+                vsBlob->Release();
+                return false;
+            }
 
-    // 修复：声明 viewport 变量
-    D3D11_VIEWPORT viewport = {
-        0.0f,
-        0.0f,
-        ImGui::GetIO().DisplaySize.x,
-        ImGui::GetIO().DisplaySize.y,
-        0.0f,
-        1.0f
+            hr = device->CreateInputLayout(layout, 1, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &fullscreenQuadInputLayout);
+            vsBlob->Release();
+            return !FAILED(hr);
+        }
+
+        void DrawFullscreenQuad() {
+            if (!fullscreenQuadVertexBuffer || !fullscreenQuadVertexShader) return;
+
+            UINT stride = sizeof(FullscreenQuadVertex);
+            UINT offset = 0;
+            context->IASetVertexBuffers(0, 1, &fullscreenQuadVertexBuffer, &stride, &offset);
+            context->IASetInputLayout(fullscreenQuadInputLayout);
+            context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            context->VSSetShader(fullscreenQuadVertexShader, nullptr, 0);
+            context->Draw(4, 0);
+        }
+
+        void ExecuteBlurPass(float radius, ID3D11ShaderResourceView* inputSRV) {
+            if (!constantBuffer || !inputSRV) return;
+
+            ID3D11RenderTargetView* prevRTV = nullptr;
+            ID3D11DepthStencilView* prevDSV = nullptr;
+            context->OMGetRenderTargets(1, &prevRTV, &prevDSV);
+
+            ID3D11BlendState* prevBlendState = nullptr;
+            FLOAT prevBlendFactor[4] = {1,1,1,1};
+            UINT prevSampleMask = 0xFFFFFFFF;
+            context->OMGetBlendState(&prevBlendState, prevBlendFactor, &prevSampleMask);
+
+            ID3D11DepthStencilState* prevDepthStencilState = nullptr;
+            UINT prevStencilRef = 0;
+            context->OMGetDepthStencilState(&prevDepthStencilState, &prevStencilRef);
+
+            ID3D11RasterizerState* prevRasterizerState = nullptr;
+            context->RSGetState(&prevRasterizerState);
+
+            UINT prevNumScissor = 0;
+            D3D11_RECT prevScissorRects[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+            context->RSGetScissorRects(&prevNumScissor, nullptr);
+            if (prevNumScissor > 0) {
+                prevNumScissor = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                context->RSGetScissorRects(&prevNumScissor, prevScissorRects);
+            }
+
+            UINT numVP = 0;
+            D3D11_VIEWPORT prevVP[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+            context->RSGetViewports(&numVP, nullptr);
+            if (numVP > 0) {
+                numVP = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+                context->RSGetViewports(&numVP, prevVP);
+            }
+
+            ID3D11ShaderResourceView* prevSRV[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
+            context->PSGetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, prevSRV);
+
+            ID3D11SamplerState* prevSampler = nullptr;
+            context->PSGetSamplers(0, 1, &prevSampler);
+
+            ID3D11Buffer* prevPSCB[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+            context->PSGetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, prevPSCB);
+
+            ID3D11PixelShader* prevPS = nullptr;
+            context->PSGetShader(&prevPS, nullptr, nullptr);
+
+            ID3D11VertexShader* prevVS = nullptr;
+            context->VSGetShader(&prevVS, nullptr, nullptr);
+
+            ID3D11InputLayout* prevLayout = nullptr;
+            context->IAGetInputLayout(&prevLayout);
+
+            ID3D11Buffer* prevVB = nullptr;
+            UINT prevVBStride = 0, prevVBOffset = 0;
+            context->IAGetVertexBuffers(0, 1, &prevVB, &prevVBStride, &prevVBOffset);
+
+            D3D11_PRIMITIVE_TOPOLOGY prevTopo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+            context->IAGetPrimitiveTopology(&prevTopo);
+
+            D3D11_VIEWPORT viewport = {
+                0.0f,
+                0.0f,
+                static_cast<float>(backbufferWidth),
+                static_cast<float>(backbufferHeight),
+                0.0f,
+                1.0f
+            };
+            context->RSSetViewports(1, &viewport);
+
+            ID3D11ShaderResourceView* nullSRV[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
+            context->PSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullSRV);
+
+            ID3D11RenderTargetView* rtvX[1] = { blurRTVX };
+            context->OMSetRenderTargets(1, rtvX, nullptr);
+            context->PSSetShader(blurShaderX, nullptr, 0);
+            context->PSSetConstantBuffers(0, 1, &constantBuffer);
+            context->PSSetSamplers(0, 1, &samplerState);
+
+            ID3D11ShaderResourceView* srvArrayX[1] = { inputSRV };
+            context->PSSetShaderResources(0, 1, srvArrayX);
+
+            {
+                BlurConstants constants = {1.0f / backbufferWidth, radius, 0.0f, 0.0f};
+                D3D11_MAPPED_SUBRESOURCE mapped;
+                if (!FAILED(context->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                    memcpy(mapped.pData, &constants, sizeof(constants));
+                    context->Unmap(constantBuffer, 0);
+                }
+            }
+
+            DrawFullscreenQuad();
+
+            context->PSSetShaderResources(0, 1, nullSRV);
+
+            ID3D11RenderTargetView* rtvY[1] = { blurRTVY };
+            context->OMSetRenderTargets(1, rtvY, nullptr);
+            context->PSSetShader(blurShaderY, nullptr, 0);
+            context->PSSetConstantBuffers(0, 1, &constantBuffer);
+            context->PSSetSamplers(0, 1, &samplerState);
+
+            ID3D11ShaderResourceView* srvArrayY[1] = { blurSRVX };
+            context->PSSetShaderResources(0, 1, srvArrayY);
+
+            {
+                BlurConstants constants = {1.0f / backbufferHeight, radius, 0.0f, 0.0f};
+                D3D11_MAPPED_SUBRESOURCE mapped;
+                if (!FAILED(context->Map(constantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                    memcpy(mapped.pData, &constants, sizeof(constants));
+                    context->Unmap(constantBuffer, 0);
+                }
+            }
+
+            DrawFullscreenQuad();
+
+            ID3D11RenderTargetView* nullRTV[1] = { nullptr };
+            context->OMSetRenderTargets(1, nullRTV, nullptr);
+            ID3D11SamplerState* nullSamplerState = nullptr;
+            context->PSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, nullSRV);
+            context->PSSetSamplers(0, 1, &nullSamplerState);
+            ID3D11Buffer* nullCB[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
+            context->PSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, nullCB);
+            context->PSSetShader(nullptr, nullptr, 0);
+            context->VSSetShader(nullptr, nullptr, 0);
+
+            context->RSSetState(nullptr);
+            context->OMSetDepthStencilState(nullptr, 0);
+
+            context->OMSetBlendState(prevBlendState ? prevBlendState : nullptr, prevBlendFactor, prevSampleMask);
+            if (prevDepthStencilState) context->OMSetDepthStencilState(prevDepthStencilState, prevStencilRef);
+            if (prevRasterizerState) context->RSSetState(prevRasterizerState);
+
+            context->PSSetShaderResources(0, D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT, prevSRV);
+            context->PSSetSamplers(0, 1, &prevSampler);
+            context->PSSetConstantBuffers(0, D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT, prevPSCB);
+            context->PSSetShader(prevPS, nullptr, 0);
+            context->VSSetShader(prevVS, nullptr, 0);
+            context->IASetInputLayout(prevLayout);
+            context->IASetPrimitiveTopology(prevTopo);
+            if (prevVB) context->IASetVertexBuffers(0, 1, &prevVB, &prevVBStride, &prevVBOffset);
+            if (numVP > 0) context->RSSetViewports(numVP, prevVP);
+            if (prevNumScissor > 0) context->RSSetScissorRects(prevNumScissor, prevScissorRects);
+            context->OMSetRenderTargets(1, &prevRTV, prevDSV);
+
+            if (prevRTV) prevRTV->Release();
+            if (prevDSV) prevDSV->Release();
+            if (prevBlendState) prevBlendState->Release();
+            if (prevDepthStencilState) prevDepthStencilState->Release();
+            if (prevRasterizerState) prevRasterizerState->Release();
+            for (int i = 0; i < D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT; i++) {
+                if (prevSRV[i]) prevSRV[i]->Release();
+            }
+            for (int i = 0; i < D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT; i++) {
+                if (prevPSCB[i]) prevPSCB[i]->Release();
+            }
+            if (prevSampler) prevSampler->Release();
+            if (prevPS) prevPS->Release();
+            if (prevVS) prevVS->Release();
+            if (prevLayout) prevLayout->Release();
+            if (prevVB) prevVB->Release();
+        }
+
+        void ReleaseBlurTextures() {
+            if (blurTextureX) { blurTextureX->Release(); blurTextureX = nullptr; }
+            if (blurSRVX) { blurSRVX->Release(); blurSRVX = nullptr; }
+            if (blurRTVX) { blurRTVX->Release(); blurRTVX = nullptr; }
+            if (blurTextureY) { blurTextureY->Release(); blurTextureY = nullptr; }
+            if (blurSRVY) { blurSRVY->Release(); blurSRVY = nullptr; }
+            if (blurRTVY) { blurRTVY->Release(); blurRTVY = nullptr; }
+        }
+
+        void ReleaseResources() {
+            if (blurShaderX) { blurShaderX->Release(); blurShaderX = nullptr; }
+            if (blurShaderY) { blurShaderY->Release(); blurShaderY = nullptr; }
+            if (samplerState) { samplerState->Release(); samplerState = nullptr; }
+            ReleaseBlurTextures();
+            if (fullscreenQuadVertexBuffer) { fullscreenQuadVertexBuffer->Release(); fullscreenQuadVertexBuffer = nullptr; }
+            if (fullscreenQuadVertexShader) { fullscreenQuadVertexShader->Release(); fullscreenQuadVertexShader = nullptr; }
+            if (fullscreenQuadInputLayout) { fullscreenQuadInputLayout->Release(); fullscreenQuadInputLayout = nullptr; }
+            if (constantBuffer) { constantBuffer->Release(); constantBuffer = nullptr; }
+        }
+
+        ID3D11Device* device = nullptr;
+        ID3D11DeviceContext* context = nullptr;
+
+        ID3D11PixelShader* blurShaderX = nullptr;
+        ID3D11PixelShader* blurShaderY = nullptr;
+        ID3D11SamplerState* samplerState = nullptr;
+
+        ID3D11Texture2D* blurTextureX = nullptr;
+        ID3D11ShaderResourceView* blurSRVX = nullptr;
+        ID3D11RenderTargetView* blurRTVX = nullptr;
+
+        ID3D11Texture2D* blurTextureY = nullptr;
+        ID3D11ShaderResourceView* blurSRVY = nullptr;
+        ID3D11RenderTargetView* blurRTVY = nullptr;
+
+        ID3D11Buffer* fullscreenQuadVertexBuffer = nullptr;
+        ID3D11VertexShader* fullscreenQuadVertexShader = nullptr;
+        ID3D11InputLayout* fullscreenQuadInputLayout = nullptr;
+
+        ID3D11Buffer* constantBuffer = nullptr;
+
+        int                     backbufferWidth = 0;
+        int                     backbufferHeight = 0;
+        bool                    isInitialized = false;
     };
-    context->RSSetViewports(1, &viewport);
-
-    // 计算 UV 坐标
-    ImVec2 screenSize = ImGui::GetIO().DisplaySize;
-    ImVec2 uv0(pos.x / screenSize.x, pos.y / screenSize.y);
-    ImVec2 uv1((pos.x + size.x) / screenSize.x, (pos.y + size.y) / screenSize.y);
-
-    // 绘制模糊后的纹理
-    drawList->AddImageRounded(
-        reinterpret_cast<ImTextureID>(blurSRVY),
-        pos,
-        ImVec2(pos.x + size.x, pos.y + size.y),
-        uv0, uv1,
-        ImColor(ImVec4(1.f, 1.f, 1.f, 1.f)),
-        rounding,
-        flags
-    );
-}
-void DX11BlurEffect::EndBlur() {
-    if (!isInitialized) return;
-
-    if (rtBackup) {
-        context->OMSetRenderTargets(1, &rtBackup, nullptr);
-        rtBackup->Release();
-        rtBackup = nullptr;
-    }
-
-    context->PSSetShader(nullptr, nullptr, 0);
-    ID3D11SamplerState* nullSampler = nullptr;
-    context->PSSetSamplers(0, 1, &nullSampler);
-}
-
-DX11BlurEffect::~DX11BlurEffect() {
-    if (blurShaderX) blurShaderX->Release();
-    if (blurShaderY) blurShaderY->Release();
-    if (samplerState) samplerState->Release();
-    if (blurTexture) blurTexture->Release();
-    if (blurSRV) blurSRV->Release();
-    if (blurRTV) blurRTV->Release();
-    if (blurTextureX) blurTextureX->Release();
-    if (blurSRVX) blurSRVX->Release();
-    if (blurRTVX) blurRTVX->Release();
-    if (blurTextureY) blurTextureY->Release();
-    if (blurSRVY) blurSRVY->Release();
-    if (blurRTVY) blurRTVY->Release();
-    if (fullscreenQuadVertexBuffer) fullscreenQuadVertexBuffer->Release();
-    if (fullscreenQuadVertexShader) fullscreenQuadVertexShader->Release();
-    if (fullscreenQuadInputLayout) fullscreenQuadInputLayout->Release();
-    if (constantBuffer) constantBuffer->Release();
-}
+} // namespace DX11BlurEffectNS

@@ -2,6 +2,7 @@
 #include "DX11BlurEffect.hpp"
 #include <d3dcompiler.h>
 
+inline DX11BlurEffectNS::BlurEffect blurEffect;
 // 全局变量
 HWND g_hWnd = nullptr;
 ID3D11Device* g_pd3dDevice = nullptr;
@@ -27,6 +28,9 @@ ID3D11SamplerState* g_pBgSampler = nullptr;
 
 int g_Width = 1280;
 int g_Height = 800;
+
+static float g_BlurRadius = 50.0f;
+static float g_BlurRounding = 10.0f;
 
 // 前向声明
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -272,7 +276,10 @@ void RenderFrame()
     const float clearColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     g_pd3dDeviceContext->ClearRenderTargetView(g_pMainRTV, clearColor);
     DrawBackgroundImage();
-    blurEffect.BeginBlur();
+
+    if (blurEffect.IsInitialized())
+        blurEffect.CaptureAndBlur(g_pSwapChain, g_BlurRadius);
+
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -286,15 +293,17 @@ void RenderFrame()
         ImGuiWindowFlags_NoCollapse |
         ImGuiWindowFlags_NoBackground);  // 先禁用背景，手动控制
 
-    static bool is = false;
-    static float sliderValue = 50.0f;
-    static float roundingValue = 10.0f;
+    static bool is = true;
+    float sliderValue = g_BlurRadius;
+    float roundingValue = g_BlurRounding;
 
     if (is) {
-        blurEffect.ApplyBlur(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize(), sliderValue, roundingValue);
+        blurEffect.ApplyBlur(ImGui::GetWindowDrawList(), ImGui::GetWindowPos(), ImGui::GetWindowSize(),
+            sliderValue, roundingValue, ImDrawFlags_RoundCornersAll, IM_COL32(255, 255, 255, 255));
     }
     else {
-        blurEffect.ApplyBlur(ImGui::GetBackgroundDrawList(), ImGui::GetMainViewport()->Pos, ImGui::GetMainViewport()->Size, sliderValue, roundingValue);
+        blurEffect.ApplyBlur(ImGui::GetBackgroundDrawList(), ImGui::GetMainViewport()->Pos, ImGui::GetMainViewport()->Size,
+            sliderValue, roundingValue, ImDrawFlags_RoundCornersAll, IM_COL32(255, 255, 255, 255));
         ImVec2 winPos = ImGui::GetWindowPos();
         ImVec2 winSize = ImGui::GetWindowSize();
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -309,23 +318,17 @@ void RenderFrame()
     ImGui::Separator();
     ImGui::Text("Window Size: %d x %d", g_Width, g_Height);
 
-    if (ImGui::Checkbox(u8"Switch", &is)) {
-        blurEffect.InvalidateCache();
-    }
-    if (ImGui::SliderFloat("Blur Radius", &sliderValue, 0.0f, 100.0f)) {
-        blurEffect.InvalidateCache();
-    }
-    if (ImGui::SliderFloat("Blur Rounding", &roundingValue, 0.0f, 365.0f)) {
-        blurEffect.InvalidateCache();
-    }
+    ImGui::Checkbox(u8"Switch", &is);
+    if (ImGui::SliderFloat("Blur Radius", &sliderValue, 0.0f, 100.0f)) g_BlurRadius = sliderValue;
+    if (ImGui::SliderFloat("Blur Rounding", &roundingValue, 0.0f, 365.0f)) g_BlurRounding = roundingValue;
     if (ImGui::Button("Reset Radius")) {
         sliderValue = 10.0f;
-        blurEffect.InvalidateCache();
+        g_BlurRadius = sliderValue;
     }
     ImGui::SameLine();
     if (ImGui::Button("Max Radius")) {
         sliderValue = 64.0f;
-        blurEffect.InvalidateCache();
+        g_BlurRadius = sliderValue;
     }
 
     // 背景图片切换按钮
@@ -344,9 +347,8 @@ void RenderFrame()
         1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 
     ImGui::End();
-    ImGui::PopStyleColor();  // 恢复窗口背景色
+    ImGui::PopStyleColor();
 
-    blurEffect.EndBlur();
     ImGui::Render();
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_pMainRTV, nullptr);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
@@ -361,7 +363,7 @@ bool CreateDeviceD3D(HWND hWnd)
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.BufferDesc.RefreshRate.Numerator = 60;
     sd.BufferDesc.RefreshRate.Denominator = 1;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT;
     sd.OutputWindow = hWnd;
     sd.SampleDesc.Count = 1;
     sd.SampleDesc.Quality = 0;
